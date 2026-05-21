@@ -1,0 +1,43 @@
+---
+- name: Install custom CA certificate for Git on Windows
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    cert_download_url: "https://artifactory.company.com/certs/rootCA.pem"
+    cert_directory: "C:\\company\\certs"
+    cert_file_name: "company-rootCA.pem"
+    git_ssl_ca_path: "{{ cert_directory }}\\{{ cert_file_name }}"
+
+    # Optional Artifactory credentials
+    artifactory_username: "admin"
+    artifactory_password: "password"
+
+  tasks:
+
+    - name: Create certificate directory
+      ansible.windows.win_file:
+        path: "{{ cert_directory }}"
+        state: directory
+
+    - name: Download CA certificate from Artifactory
+      ansible.windows.win_get_url:
+        url: "{{ cert_download_url }}"
+        dest: "{{ git_ssl_ca_path }}"
+        url_username: "{{ artifactory_username }}"
+        url_password: "{{ artifactory_password }}"
+        force: true
+        validate_certs: false
+
+    - name: Configure Git to use custom CA certificate globally
+      ansible.windows.win_command: >
+        git config --global http.sslCAInfo "{{ git_ssl_ca_path }}"
+
+    - name: Verify Git sslCAInfo configuration
+      ansible.windows.win_command: >
+        git config --global --get http.sslCAInfo
+      register: git_ssl_config
+
+    - name: Display configured sslCAInfo path
+      ansible.builtin.debug:
+        msg: "Configured Git sslCAInfo: {{ git_ssl_config.stdout }}"
