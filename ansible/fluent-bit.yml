@@ -1,0 +1,9 @@
+- name: Copy parsers.conf for application
+  ansible.windows.win_copy:
+    src: "{{ parsers_conf_src }}"
+    dest: "C:\\{{ application_name }}\\conf\\parsers.conf"
+
+- name: Copy fluent.conf for application
+  ansible.windows.win_copy:
+    src: "{{ fluent_conf_src }}"
+    dest: "C:\\{{ application_name }}\\conf\\fluent.conf"
