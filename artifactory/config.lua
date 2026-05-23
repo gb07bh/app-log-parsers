@@ -1,5 +1,8 @@
 function parse_repo(tag, timestamp, record)
 
+    --
+    -- URL required
+    --
     local url = record["url"]
 
     if url == nil then
@@ -9,22 +12,57 @@ function parse_repo(tag, timestamp, record)
     url = string.lower(url)
 
     --
-    -- Extract repository from URL
+    -- localhost detection
     --
-    -- Example:
-    -- /artifactory/payments-maven-local-dev/com/test/app.jar
+    local remote_address = record["remote_address"]
+
+    if remote_address ~= nil then
+
+        if remote_address == "127.0.0.1" or
+           remote_address == "localhost" then
+
+            record["client_type"] = "localhost"
+        end
+    end
+
+    --
+    -- extract repository
+    --
+    -- supports:
+    --
+    -- /artifactory/repo-name/path
+    -- /repo-name/path
     --
 
     local repo =
         string.match(url, "^/artifactory/([^/]+)")
 
     if repo == nil then
+
+        repo =
+            string.match(url, "^/([^/]+)")
+    end
+
+    if repo == nil then
+        return 1, timestamp, record
+    end
+
+    --
+    -- ignore internal API/system endpoints
+    --
+    if repo == "api" or
+       repo == "ui" or
+       repo == "router" or
+       repo == "access" then
+
         return 1, timestamp, record
     end
 
     record["repo"] = repo
 
     --
+    -- local repository
+    -- pattern:
     -- team-techtype-local-env
     --
     local team, techtype, environment =
@@ -42,11 +80,15 @@ function parse_repo(tag, timestamp, record)
     end
 
     --
-    -- techtype-remote
+    -- remote repository
+    -- patterns:
+    -- docker-remote
+    -- nuget-remote-cache
+    -- maven-remote-cache
     --
     local remote_tech =
         string.match(repo,
-            "^([^-]+)-remote$")
+            "^([^-]+)-remote.*$")
 
     if remote_tech ~= nil then
 
@@ -57,6 +99,8 @@ function parse_repo(tag, timestamp, record)
     end
 
     --
+    -- virtual repository
+    -- pattern:
     -- team-techtype
     --
     local virtual_team, virtual_tech =
