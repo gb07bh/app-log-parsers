@@ -1,0 +1,32 @@
+---
+- name: Generate HTML Report
+
+  hosts: localhost
+
+  gather_facts: false
+
+  tasks:
+
+    - name: Read JSON report
+
+      set_fact:
+
+        report_data: >-
+          {{
+            lookup(
+              'file',
+              'reports/report.json'
+            ) | from_json
+          }}
+
+    - name: Generate HTML report
+
+      template:
+
+        src: templates/execution_report.html.j2
+
+        dest: reports/execution_report.html
+
+      vars:
+
+        report: "{{ report_data }}"
