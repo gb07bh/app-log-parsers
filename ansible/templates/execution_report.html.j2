@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<title>Ansible Execution Report</title>
+
+<style>
+
+body {
+    font-family: Arial;
+    background-color: #f4f4f4;
+    margin: 20px;
+}
+
+h1 {
+    color: #2c3e50;
+}
+
+.server {
+    margin-bottom: 15px;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid #ccc;
+}
+
+.server-header {
+    background-color: #34495e;
+    color: white;
+    padding: 12px;
+    cursor: pointer;
+    font-size: 18px;
+}
+
+.task-container {
+    display: none;
+    background: white;
+    padding: 10px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th {
+    background: #2c3e50;
+    color: white;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    text-align: left;
+}
+
+.passed {
+    color: green;
+    font-weight: bold;
+}
+
+.failed {
+    color: red;
+    font-weight: bold;
+}
+
+.skipped {
+    color: orange;
+    font-weight: bold;
+}
+
+.unreachable {
+    color: purple;
+    font-weight: bold;
+}
+
+.summary-box {
+
+    background: white;
+
+    padding: 15px;
+
+    margin-bottom: 20px;
+
+    border-radius: 5px;
+
+    border: 1px solid #ccc;
+}
+
+</style>
+
+<script>
+
+function toggleTasks(id) {
+
+    var x = document.getElementById(id);
+
+    if (x.style.display === "none") {
+
+        x.style.display = "block";
+
+    } else {
+
+        x.style.display = "none";
+    }
+}
+
+</script>
+
+</head>
+
+<body>
+
+<h1>Ansible Execution Report</h1>
+
+<div class="summary-box">
+
+<h2>Execution Summary</h2>
+
+<p>
+Generated On:
+{{ lookup('pipe', 'date') }}
+</p>
+
+</div>
+
+{% for host, tasks in report.items() %}
+
+<div class="server">
+
+<div class="server-header"
+onclick="toggleTasks('{{ host }}')">
+
+▶ {{ host }}
+
+</div>
+
+<div class="task-container"
+id="{{ host }}">
+
+<table>
+
+<tr>
+
+<th>Task Name</th>
+
+<th>Status</th>
+
+<th>Duration</th>
+
+<th>Changed</th>
+
+<th>Failure Reason</th>
+
+<th>Skip Reason</th>
+
+</tr>
+
+{% for task in tasks %}
+
+<tr>
+
+<td>
+{{ task.task }}
+</td>
+
+<td class="{{ task.status | lower }}">
+
+{{ task.status }}
+
+</td>
+
+<td>
+
+{{ task.duration }} sec
+
+</td>
+
+<td>
+
+{{ task.changed }}
+
+</td>
+
+<td>
+
+{{ task.failed_reason }}
+
+</td>
+
+<td>
+
+{{ task.skip_reason }}
+
+</td>
+
+</tr>
+
+{% endfor %}
+
+</table>
+
+</div>
+
+</div>
+
+{% endfor %}
+
+</body>
+
+</html>
