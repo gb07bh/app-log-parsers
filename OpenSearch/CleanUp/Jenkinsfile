@@ -1,0 +1,155 @@
+/**
+ * ==============================================================================
+ * OpenSearch Automation
+ * ==============================================================================
+ * Description:
+ * Orchestrates multi-cluster OpenSearch cleanup, cluster metrics history collection,
+ * rolling 30-day Artifactory sync, Chart.js executive HTML dashboard generation,
+ * and email notifications.
+ *
+ * Documentation Wiki URL:
+ * https://wiki.company.com/display/OPENSEARCH/OpenSearch+Automation+V2
+ * ==============================================================================
+ */
+
+pipeline {
+    agent any
+
+    options {
+        // Prevent concurrent execution of this pipeline
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timestamps()
+    }
+
+    parameters {
+        choice(
+            name: 'MODE',
+            choices: ['REPORT', 'DELETE'],
+            description: 'Execution Mode: REPORT generates CSV without deleting; DELETE removes indices.'
+        )
+        choice(
+            name: 'TARGET_CLUSTER',
+            choices: ['ALL', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6'],
+            description: 'Target OpenSearch cluster or ALL for all 6 clusters.'
+        )
+        string(
+            name: 'TOP_N',
+            defaultValue: '10',
+            description: 'Number of top largest deletion candidate indices to evaluate.'
+        )
+        string(
+            name: 'WORKERS',
+            defaultValue: '4',
+            description: 'Number of parallel worker threads for multi-cluster processing.'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: true,
+            description: 'Simulate index deletions without performing real REST DELETE commands.'
+        )
+        string(
+            name: 'EMAIL_RECIPIENTS',
+            defaultValue: 'opensearch-admin@company.com',
+            description: 'Comma-separated email addresses for pipeline notifications.'
+        )
+    }
+
+    environment {
+        PYTHONUNBUFFERED = '1'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "Checking out codebase..."
+            }
+        }
+
+        stage('Cleanup Automation') {
+            steps {
+                script {
+                    echo "=== Executing Cleanup Automation Stage ==="
+                    def dryRunFlag = params.DRY_RUN ? '--dry-run' : ''
+                    sh """
+                        python scripts/cleanup.py \
+                            --cluster ${params.TARGET_CLUSTER} \
+                            --mode ${params.MODE} \
+                            --top-n ${params.TOP_N} \
+                            --workers ${params.WORKERS} \
+                            ${dryRunFlag} \
+                            --verbose
+                    """
+                }
+            }
+        }
+
+        stage('Metrics Automation') {
+            steps {
+                script {
+                    echo "=== Executing Metrics Automation Stage ==="
+                    sh """
+                        python scripts/metrics.py \
+                            --cluster ${params.TARGET_CLUSTER} \
+                            --workers ${params.WORKERS} \
+                            --verbose
+                    """
+                }
+            }
+        }
+
+        stage('Generate Executive Dashboard') {
+            steps {
+                script {
+                    echo "=== Generating HTML Executive Dashboard ==="
+                    sh """
+                        python scripts/dashboard.py --verbose
+                    """
+                }
+            }
+        }
+
+        stage('Archive Reports') {
+            steps {
+                echo "Archiving generated CSV and HTML artifacts..."
+                archiveArtifacts artifacts: 'reports/**/*.csv, reports/**/*.html, logs/*.log', allowEmptyArchive: true
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "Pipeline execution succeeded. Sending EmailExt Notification..."
+                emailext(
+                    to: "${params.EMAIL_RECIPIENTS}",
+                    subject: "[SUCCESS] OpenSearch Automation V2 Report - Cluster: ${params.TARGET_CLUSTER} (Mode: ${params.MODE})",
+                    body: '${FILE, path="reports/html/dashboard.html"}',
+                    mimeType: 'text/html',
+                    attachmentsPattern: 'reports/csv/*.csv'
+                )
+            }
+        }
+
+        failure {
+            script {
+                echo "Pipeline execution failed. Sending Failure EmailExt Notification..."
+                emailext(
+                    to: "${params.EMAIL_RECIPIENTS}",
+                    subject: "[FAILURE] OpenSearch Automation V2 Execution Alert - Cluster: ${params.TARGET_CLUSTER}",
+                    body: """
+                        <h2>OpenSearch Automation Pipeline Execution Failed</h2>
+                        <p><strong>Build Number:</strong> ${env.BUILD_NUMBER}</p>
+                        <p><strong>Target Cluster:</strong> ${params.TARGET_CLUSTER}</p>
+                        <p><strong>Console Log:</strong> <a href="${env.BUILD_URL}console">${env.BUILD_URL}console</a></p>
+                        <hr/>
+                        <h3>Dashboard Preview (if generated):</h3>
+                        \${FILE, path="reports/html/dashboard.html"}
+                    """,
+                    mimeType: 'text/html',
+                    attachmentsPattern: 'reports/csv/*.csv, logs/*.log'
+                )
+            }
+        }
+    }
+}
