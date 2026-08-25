@@ -1,0 +1,162 @@
+service:
+  flush: 1
+  log_level: info
+
+  parsers_file: /fluent-bit/etc/parsers.conf
+
+
+pipeline:
+
+  # ==========================================================
+  # Bitbucket access log
+  # ==========================================================
+  inputs:
+
+    - name: tail
+      tag: bitbucket.access
+      path: /bitbucket/log/atlassian-bitbucket-access.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/bitbucket-access.db
+      parser: bitbucket_access
+
+
+    # ========================================================
+    # Bitbucket application log
+    # ========================================================
+
+    - name: tail
+      tag: bitbucket.application
+      path: /bitbucket/log/atlassian-bitbucket.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/bitbucket-application.db
+      parser: bitbucket_application
+
+
+    # ========================================================
+    # Bitbucket audit log
+    # ========================================================
+
+    - name: tail
+      tag: bitbucket.audit
+      path: /bitbucket/log/audit/atlassian-bitbucket-audit.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/bitbucket-audit.db
+      parser: bitbucket_audit
+
+
+    # ========================================================
+    # Bitbucket Search log
+    # ========================================================
+
+    - name: tail
+      tag: bitbucket.search
+      path: /bitbucket/log/search/bitbucket_search.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/bitbucket-search.db
+      parser: bitbucket_search
+
+
+    # ========================================================
+    # Mesh access log
+    # ========================================================
+
+    - name: tail
+      tag: bitbucket.mesh.access
+      path: /bitbucket/mesh/logs/atlassian-mesh-access.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/mesh-access.db
+      parser: mesh_access
+
+
+    # ========================================================
+    # Mesh application log
+    # ========================================================
+
+    - name: tail
+      tag: bitbucket.mesh.application
+      path: /bitbucket/mesh/logs/atlassian-mesh.log
+      read_from_head: true
+      refresh_interval: 10
+      rotate_wait: 30
+      db: /fluent-bit/state/mesh-application.db
+      parser: mesh_application
+
+
+  filters:
+
+    # ==========================================================
+    # Common Lua normalization
+    # ==========================================================
+
+    - name: lua
+      match: bitbucket.*
+      script: /fluent-bit/etc/bitbucket.lua
+      call: normalize
+
+
+    # ==========================================================
+    # Preserve/standardize correlation fields
+    #
+    # Lua has already created:
+    #
+    # request_id_original
+    # request_direction
+    #
+    # mesh_execution_id_original
+    # mesh_request_direction
+    #
+    # This modify filter deliberately does NOT overwrite the
+    # original request IDs.
+    # ==========================================================
+
+    - name: modify
+      match: bitbucket.*
+      add:
+        log_source: bitbucket-data-center
+
+
+    # ==========================================================
+    # Add a normalized log_type based on tag.
+    #
+    # The parser itself remains responsible only for parsing.
+    # ==========================================================
+
+    - name: modify
+      match: bitbucket.access
+      add:
+        log_type: bitbucket_access
+
+    - name: modify
+      match: bitbucket.application
+      add:
+        log_type: bitbucket_application
+
+    - name: modify
+      match: bitbucket.audit
+      add:
+        log_type: bitbucket_audit
+
+    - name: modify
+      match: bitbucket.search
+      add:
+        log_type: bitbucket_search
+
+    - name: modify
+      match: bitbucket.mesh.access
+      add:
+        log_type: mesh_access
+
+    - name: modify
+      match: bitbucket.mesh.application
+      add:
+        log_type: mesh_application
