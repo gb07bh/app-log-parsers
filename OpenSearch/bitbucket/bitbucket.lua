@@ -230,3 +230,51 @@ function normalize(tag, timestamp, record)
 
     return 1, timestamp, record
 end
+
+
+
+
+
+local function normalize_access_fields(record)
+    local fields = record["access_fields"]
+
+    if fields == nil then return end
+
+    local values = {}
+
+    for value in fields:gmatch("([^|]+)") do
+        value = value:gsub("^%s+", ""):gsub("%s+$", "")
+        table.insert(values, value)
+    end
+
+    if record["protocol"] == "ssh" then
+        if record["request_id_direction"] == "input" then
+            if #values >= 1 then record["status"] = values[1] end
+            if #values >= 2 then record["bytes_read"] = values[2] end
+            if #values >= 3 then record["session_id"] = values[#values] end
+        else
+            if #values >= 1 then record["status"] = values[1] end
+            if #values >= 2 then record["bytes_read"] = values[2] end
+            if #values >= 3 then record["bytes_written"] = values[3] end
+            if #values >= 4 then record["labels"] = values[4] end
+            if #values >= 5 then record["duration_ms"] = values[5] end
+            if #values >= 6 then record["session_id"] = values[6] end
+        end
+    else
+        if #values >= 1 then record["status"] = values[1] end
+        if #values >= 2 then record["bytes_read"] = values[2] end
+        if #values >= 3 then record["bytes_written"] = values[3] end
+        if #values >= 4 then record["labels"] = values[4] end
+        if #values >= 5 then record["duration_ms"] = values[5] end
+        if #values >= 6 then record["session_id"] = values[6] end
+    end
+
+    record["access_fields"] = nil
+
+    for _, field in ipairs({"status", "bytes_read", "bytes_written", "duration_ms"}) do
+        if record[field] ~= nil then
+            local value = to_number(record[field])
+            if value ~= nil then record[field] = value end
+        end
+    end
+end
