@@ -52,6 +52,17 @@ OUTPUT_COLUMNS = [
 ]
 LOGGER = logging.getLogger("jfrog_audit")
 
+# ---------------------------------------------------------------------------
+# USER CONFIGURATION — edit these values directly in this script.
+# ---------------------------------------------------------------------------
+JFROG_URL = "https://your-jfrog-host"
+JFROG_AUTH_MODE = "bearer"  # "bearer" or "x-jfrog-api"
+JFROG_TOKEN = "REPLACE_WITH_YOUR_TOKEN"
+REQUEST_TIMEOUT = 30  # seconds
+OUTPUT_FILE = "service_account_delete_audit.xlsx"
+# ---------------------------------------------------------------------------
+
+
 
 class AuditError(RuntimeError):
     pass
@@ -276,25 +287,21 @@ def build_rows(
 
 def main() -> int:
     configure_logging()
-    raw_url = os.getenv("JFROG_URL", "")
-    credential = os.getenv("JFROG_TOKEN", "")
-    auth_mode = os.getenv("JFROG_AUTH_MODE", "bearer").strip().lower()
-    verify_tls = False  # Deliberately fixed per request: all HTTP calls use verify=False.
-    try:
-        timeout = int(os.getenv("JFROG_TIMEOUT", "30"))
-    except ValueError:
-        LOGGER.error("JFROG_TIMEOUT must be an integer.")
-        return 2
-    output = Path(os.getenv("JFROG_OUTPUT", "service_account_delete_audit.xlsx"))
+    raw_url = JFROG_URL
+    credential = JFROG_TOKEN
+    auth_mode = JFROG_AUTH_MODE.strip().lower()
+    verify_tls = False  # All requests use verify=False as requested.
+    timeout = REQUEST_TIMEOUT
+    output = Path(OUTPUT_FILE)
 
-    if not raw_url or not credential:
-        LOGGER.error("Set JFROG_URL and JFROG_TOKEN environment variables.")
+    if not raw_url or not credential or credential == "REPLACE_WITH_YOUR_TOKEN":
+        LOGGER.error("Set JFROG_URL and JFROG_TOKEN in the USER CONFIGURATION section.")
         return 2
     if auth_mode not in {"bearer", "x-jfrog-api"}:
         LOGGER.error("JFROG_AUTH_MODE must be 'bearer' or 'x-jfrog-api'.")
         return 2
-    if timeout <= 0:
-        LOGGER.error("JFROG_TIMEOUT must be positive.")
+    if not isinstance(timeout, int) or timeout <= 0:
+        LOGGER.error("REQUEST_TIMEOUT must be a positive integer.")
         return 2
     LOGGER.warning("TLS certificate verification is disabled (verify=False), as configured.")
 
