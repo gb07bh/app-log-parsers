@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
 Read-only JFrog Artifactory service-account Delete-permission audit.
-Designed for Artifactory 7.143.x using the legacy per-user permission endpoint.
+Designed for Artifactory 7.143.x using permission-target-centric retrieval.
 
 Install:
     python -m pip install requests pandas openpyxl
 
-Environment:
-    JFROG_URL=https://jfrog.example.com
-    JFROG_AUTH_MODE=bearer            # bearer or x-jfrog-api
-    JFROG_TOKEN=<access-token-or-api-key>
-    # TLS verification is disabled in this script (verify=False), per configuration.
-    JFROG_TIMEOUT=30                  # optional
-    JFROG_OUTPUT=service_account_delete_audit.xlsx  # optional
-
-Run:
-    python jfrog_permission_audit.py
+Edit the global USER CONFIGURATION block, then run:
+    python jfrog_permission_audit_globals.py
 
 This script makes GET requests only. Review the workbook's Audit Summary and
 API Errors sheets before relying on the results. Validate at least one direct
@@ -26,12 +18,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from typing import Any
 
 import pandas as pd
+from tqdm import tqdm
 import requests
 import urllib3
 from requests.adapters import HTTPAdapter
@@ -43,8 +37,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 USER_LIST_PATH = "/access/api/v2/users"
 USER_DETAILS_PATH = "/access/api/v2/users/{username}"
 REPOSITORIES_PATH = "/artifactory/api/repositories"
-# Available on older Artifactory versions; returns permission targets relevant to a user.
-USER_PERMISSIONS_PATH = "/artifactory/api/v2/security/permissions/users/{username}"
 
 OUTPUT_COLUMNS = [
     "UserName", "User Email", "Permission Name", "Repository Name",
@@ -60,6 +52,7 @@ JFROG_AUTH_MODE = "bearer"  # "bearer" or "x-jfrog-api"
 JFROG_TOKEN = "REPLACE_WITH_YOUR_TOKEN"
 REQUEST_TIMEOUT = 30  # seconds
 OUTPUT_FILE = "service_account_delete_audit.xlsx"
+MAX_WORKERS = 4  # Hard cap requested; tune lower if the server rate-limits requests.
 # ---------------------------------------------------------------------------
 
 
@@ -173,6 +166,137 @@ def list_users(session: requests.Session, base_url: str, page_size: int = 500) -
     LOGGER.info("User list returned %d users; %d start with 'svc'.", len(all_users), len(matches))
     return len(all_users), matches
 
+
+
+def list_permission_target_names(session: requests.Session, base_url: str) -> list[str]:
+    """List repository permission targets once using the legacy API supported on 7.143.x."""
+    payload = get_json(session, base_url + "/artifactory/api/v2/security/permissions")
+    if not isinstance(payload, list):
+        raise AuditError("Permission target list API did not return a JSON array.")
+    return list(dict.fromkeys(
+        item["name"] for item in payload
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
+    ))
+
+
+def get_permission_target_detail(
+    session: requests.Session, base_url: str, permission_name: str
+) -> dict[str, Any]:
+    url = base_url + "/artifactory/api/v2/security/permissions/" + quote(permission_name, safe="")
+    payload = get_json(session, url)
+    if not isinstance(payload, dict):
+        raise AuditError(f"Permission target {permission_name!r} returned non-object JSON.")
+    return payload
+
+
+def get_user_profile_and_groups(
+    session: requests.Session, base_url: str, username: str
+) -> tuple[str, set[str], bool]:
+    """Fetch email and group membership in one legacy user-details request."""
+    url = base_url + "/artifactory/api/security/users/" + quote(username, safe="")
+    payload = get_json(session, url)
+    if not isinstance(payload, dict):
+        raise AuditError(f"User details for {username!r} returned non-object JSON.")
+    email = str(payload.get("email") or "").strip()
+    raw_groups = payload.get("groups", payload.get("groupNames", payload.get("user_groups")))
+    if isinstance(raw_groups, list):
+        return email, {str(g).casefold() for g in raw_groups if isinstance(g, str)}, True
+    if isinstance(raw_groups, dict):
+        return email, {str(g).casefold() for g in raw_groups.keys()}, True
+    return email, set(), False
+
+
+def parse_target_grants(target: dict[str, Any]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Extract direct user and group action grants from a legacy permission target."""
+    repo = target.get("repo")
+    actions = repo.get("actions", {}) if isinstance(repo, dict) else {}
+    users: dict[str, set[str]] = {}
+    groups: dict[str, set[str]] = {}
+    if not isinstance(actions, dict):
+        return users, groups
+    for key, destination in (("users", users), ("groups", groups)):
+        grants = actions.get(key, {})
+        if isinstance(grants, dict):
+            for principal, raw_actions in grants.items():
+                if isinstance(raw_actions, list):
+                    destination[str(principal).casefold()] = {
+                        str(a).strip().casefold().replace("_", "").replace("-", "")
+                        for a in raw_actions
+                    }
+    return users, groups
+
+
+def target_matching_repositories(
+    target: dict[str, Any], all_local_repos: set[str], matching_repos: set[str]
+) -> set[str]:
+    repo = target.get("repo")
+    raw = repo.get("repositories", []) if isinstance(repo, dict) else []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    found: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name in all_local_repos:
+            found.add(name)
+        elif name.casefold() in {"any local", "any-local", "anylocal"}:
+            found.update(all_local_repos)
+        elif name.casefold() in {"any", "any repository", "any-repository"}:
+            found.update(matching_repos)
+        elif "*" in name or "?" in name:
+            LOGGER.warning("Permission target %r has wildcard repository pattern %r; not expanded automatically.",
+                           target.get("name", "<unnamed>"), name)
+    return found & matching_repos
+
+
+def action_flags(actions: set[str]) -> dict[str, bool]:
+    normalized = {a.casefold().replace("_", "").replace("-", "") for a in actions}
+    return {
+        "Read": bool(normalized & {"read", "readartifact"}),
+        "Write": bool(normalized & {"write", "deploy", "writeartifact"}),
+        "Delete": bool(normalized & {"delete", "deleteoverwrite", "deleteartifact"}),
+        "Annotate": bool(normalized & {"annotate", "annotateartifact"}),
+    }
+
+
+def map_permission_targets_to_users(
+    users: list[dict[str, Any]],
+    profiles: dict[str, tuple[str, set[str], bool]],
+    targets: list[dict[str, Any]],
+    all_local_repos: set[str],
+    matching_repos: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows: list[dict[str, Any]] = []
+    group_gaps: list[dict[str, str]] = []
+    for user in users:
+        username = user["username"]
+        email, memberships, has_group_data = profiles.get(username.casefold(), ("", set(), False))
+        if not has_group_data:
+            group_gaps.append({
+                "UserName": username,
+                "Error": "User details did not expose group memberships; group-derived grants may be omitted."
+            })
+        for target in targets:
+            user_grants, group_grants = parse_target_grants(target)
+            actions = set(user_grants.get(username.casefold(), set()))
+            for group in memberships:
+                actions.update(group_grants.get(group, set()))
+            flags = action_flags(actions)
+            if not flags["Delete"]:
+                continue
+            repos = target_matching_repositories(target, all_local_repos, matching_repos)
+            for repo_name in sorted(repos):
+                rows.append({
+                    "UserName": username,
+                    "User Email": email,
+                    "Permission Name": str(target.get("name") or ""),
+                    "Repository Name": repo_name,
+                    **flags,
+                })
+    return rows, group_gaps
 
 def get_user_email(session: requests.Session, base_url: str, username: str) -> str:
     url = base_url + USER_DETAILS_PATH.format(username=quote(username, safe=""))
@@ -311,31 +435,85 @@ def main() -> int:
 
         total_users, users = list_users(session, base_url)
         total_local_repos, matching_repos = list_local_release_repositories(session, base_url)
-        # Retrieve the full local repository set for expanding the explicit 'ANY LOCAL' target.
         repo_payload = get_json(session, base_url + REPOSITORIES_PATH, {"type": "local"})
-        all_local_repos = {str(x.get('key') or x.get('repoKey') or x.get('name')) for x in repo_payload if isinstance(x, dict) and (x.get('key') or x.get('repoKey') or x.get('name')) and str(x.get('type', 'local')).lower() == 'local'}
-        emails: dict[str, str] = {}
-        rows: list[dict[str, Any]] = []
-        errors: list[dict[str, str]] = []
-        permission_successes = 0
-        users_with_delete = set()
+        all_local_repos = {
+            str(item.get("key") or item.get("repoKey") or item.get("name"))
+            for item in repo_payload
+            if isinstance(item, dict)
+            and (item.get("key") or item.get("repoKey") or item.get("name"))
+            and str(item.get("type", "local")).lower() == "local"
+        }
 
-        for idx, user in enumerate(users, start=1):
-            username = user["username"]
-            if username not in emails:
-                emails[username] = get_user_email(session, base_url, username)
+        if not isinstance(MAX_WORKERS, int) or not 1 <= MAX_WORKERS <= 4:
+            raise AuditError("MAX_WORKERS must be an integer from 1 through 4.")
+
+        profile_errors: list[dict[str, str]] = []
+        permission_errors: list[dict[str, str]] = []
+        profiles: dict[str, tuple[str, set[str], bool]] = {}
+
+        def fetch_profile(username: str):
+            worker_session = make_session(credential, auth_mode, verify_tls, timeout)
             try:
-                targets = get_user_permissions(session, base_url, username)
-                permission_successes += 1
-                user_rows = build_rows(username, emails[username], targets, all_local_repos, matching_repos)
-                if user_rows:
-                    users_with_delete.add(username)
-                    rows.extend(user_rows)
+                return username, get_user_profile_and_groups(worker_session, base_url, username), None
             except AuditError as exc:
-                LOGGER.error("Permission lookup failed for %s: %s", username, exc)
-                errors.append({"UserName": username, "Error": str(exc)})
-            if idx % 50 == 0:
-                LOGGER.info("Processed %d/%d matching users.", idx, len(users))
+                return username, None, str(exc)
+            finally:
+                worker_session.close()
+
+        # One profile request per service account; retrieves email and group memberships.
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(fetch_profile, u["username"]) for u in users]
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Fetching user profiles", unit="user"):
+                try:
+                    username, profile, error = future.result()
+                except Exception as exc:
+                    profile_errors.append({"UserName": "<unknown>", "Error": str(exc)})
+                    continue
+                if error or profile is None:
+                    profile_errors.append({"UserName": username, "Error": error or "Unknown profile error"})
+                else:
+                    profiles[username.casefold()] = profile
+
+        # Fetch each permission target once rather than once per user.
+        permission_names = list_permission_target_names(session, base_url)
+        permission_targets: list[dict[str, Any]] = []
+
+        def fetch_target(name: str):
+            worker_session = make_session(credential, auth_mode, verify_tls, timeout)
+            try:
+                return name, get_permission_target_detail(worker_session, base_url, name), None
+            except AuditError as exc:
+                return name, None, str(exc)
+            finally:
+                worker_session.close()
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(fetch_target, name) for name in permission_names]
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc="Fetching permission targets", unit="target"):
+                try:
+                    name, target, error = future.result()
+                except Exception as exc:
+                    permission_errors.append({"Permission Name": "<unknown>", "Error": str(exc)})
+                    continue
+                if error or target is None:
+                    permission_errors.append({"Permission Name": name, "Error": error or "Unknown target error"})
+                else:
+                    permission_targets.append(target)
+
+        rows, group_gaps = map_permission_targets_to_users(
+            users, profiles, permission_targets, all_local_repos, matching_repos
+        )
+        errors = (
+            [{"UserName": x["UserName"], "Error": x["Error"]} for x in profile_errors]
+            + [{"UserName": "Permission target: " + x["Permission Name"], "Error": x["Error"]}
+               for x in permission_errors]
+            + group_gaps
+        )
+        emails = {u["username"]: profiles.get(u["username"].casefold(), ("", set(), False))[0] for u in users}
+        permission_successes = len(permission_targets)
+        users_with_delete = {r["UserName"] for r in rows}
 
         results = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
         if not results.empty:
@@ -350,17 +528,23 @@ def main() -> int:
             ("Audit timestamp UTC", datetime.now(timezone.utc).isoformat()),
             ("JFrog base URL", base_url),
             ("Authentication mode", auth_mode),
+            ("Parallel worker threads", MAX_WORKERS),
             ("Artifactory version supplied", "7.143.x"),
             ("Username filter", "case-insensitive startswith 'svc' (includes svc_arti)"),
             ("Repository filter", "repository type LOCAL; key contains local-release (case-insensitive)"),
-            ("Permission source", "GET /artifactory/api/v2/security/permissions/users/{username}"),
-            ("Group permission handling", "Uses per-user permission endpoint; validate group-derived grants in this instance"),
+            ("Permission source", "Permission-target-centric: list and fetch each target once"),
+            ("Group permission handling", "Maps user memberships to group grants from permission targets; validate against UI"),
+            ("Permission targets listed", len(permission_names)),
+            ("Permission targets fetched successfully", len(permission_targets)),
+            ("Permission target fetch failures", len(permission_errors)),
+            ("User profile fetch failures", len(profile_errors)),
+            ("Users missing group membership data", len(group_gaps)),
             ("Total users returned by API", total_users),
             ("Matching service accounts", len(users)),
             ("Total local repositories", total_local_repos),
             ("Matching local-release repositories", len(matching_repos)),
-            ("Users with successful permission lookup", permission_successes),
-            ("Users with permission lookup failures", len(errors)),
+            ("Permission targets processed successfully", permission_successes),
+            ("User/target/group data errors", len(errors)),
             ("Users with matching Delete access", len(users_with_delete)),
             ("Rows exported (Delete=true)", len(results)),
             ("Matching users with missing email", sum(not emails.get(u["username"], "") for u in users)),
@@ -398,5 +582,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Fix variable typo guard is intentionally kept simple below in patched version.
     raise SystemExit(main())
